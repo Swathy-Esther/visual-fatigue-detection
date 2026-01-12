@@ -7,3 +7,12 @@ __pycache__/
 
 # Environment variables
 .env
+
+# Datasets (local only)
+Data/
+data/
+
+# Model weights and arrays
+*.pth
+*.npy
+
