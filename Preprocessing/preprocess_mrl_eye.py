@@ -21,10 +21,9 @@ for label_folder in ["awake", "sleepy"]:
             continue
 
         img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
-        img = img / 255.0
 
         save_path = os.path.join(output_dir, file)
-        cv2.imwrite(save_path, (img * 255).astype("uint8"))
+        cv2.imwrite(save_path, img)
         count += 1
 
     print(f"{label_folder}: {count} images processed")
