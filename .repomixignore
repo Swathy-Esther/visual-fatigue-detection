@@ -1,0 +1,17 @@
+# Python environment and cache
+venv/
+__pycache__/
+*.pyc
+
+# Heavy ML Model weights (I don't need the binary, just the .py code)
+models/*.pth
+
+# Data and reports
+Data/
+report/
+.git/
+
+# Media files (if any)
+*.mp4
+*.jpg
+*.png
