@@ -27,6 +27,7 @@ wheels/
 *.pt
 *.pwf
 *.onnx
+*.task
 
 # Data and Logs
 data/

@@ -23,7 +23,7 @@ VisionRunningMode = mp.tasks.vision.RunningMode
 import urllib.request
 import os
 
-model_path = 'face_landmarker.task'
+model_path = 'models/face_landmarker.task'
 if not os.path.exists(model_path):
     print("Downloading face landmarker model (this may take a minute)...")
     url = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task'

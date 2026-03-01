@@ -7,7 +7,7 @@ import sys
 # Ensure the script can find your 'models' and 'temporal' folders
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from models.train_eye_cnn import EyeCNN
+from train_eye_cnn import EyeCNN
 from temporal.eye_temporal_logic import EyeTemporalTracker
 
 # 1. Load Detectors and Model
