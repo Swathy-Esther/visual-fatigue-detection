@@ -6,33 +6,6 @@ from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import os
 
-# 1. Configuration
-DATA_DIR = "Data/Yawn/processed_yawn"
-MODEL_SAVE_PATH = "models/yawn_hybrid_cnn.pth"
-BATCH_SIZE = 32
-EPOCHS = 10 
-LEARNING_RATE = 0.001
-
-# 2. Data Augmentation (This makes your 2200 images act like 5000)
-transform = transforms.Compose([
-    transforms.Resize((100, 100)),
-    transforms.RandomHorizontalFlip(), # Flips mouth left-right
-    transforms.RandomRotation(15),      # Handles head tilts
-    transforms.ColorJitter(brightness=0.2), # Handles different lighting
-    transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-])
-
-# 3. Load & Split Dataset
-dataset = datasets.ImageFolder(DATA_DIR, transform=transform)
-train_size = int(0.8 * len(dataset))
-val_size = len(dataset) - train_size
-train_data, val_data = torch.utils.data.random_split(dataset, [train_size, val_size])
-
-train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
-val_loader = DataLoader(val_data, batch_size=BATCH_SIZE, shuffle=False)
-
-print(f"Total Images: {len(dataset)} | Training: {train_size} | Validation: {val_size}")
 
 # 4. Hybrid Architecture (MobileNetV2 + Custom Head)
 class HybridYawnCNN(nn.Module):
@@ -59,11 +32,44 @@ class HybridYawnCNN(nn.Module):
         return self.base(x)
 
 if __name__ == "__main__":
+
+
+    # 1. Configuration
+    DATA_DIR = "Data/Yawn/processed_yawn"
+    MODEL_SAVE_PATH = "models/yawn_hybrid_cnn.pth"
+    BATCH_SIZE = 32
+    EPOCHS = 20 
+    LEARNING_RATE = 0.001
+
     # 5. Training Setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = HybridYawnCNN().to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.base.classifier.parameters(), lr=LEARNING_RATE)
+
+
+    # 2. Data Augmentation (This makes your 2200 images act like 5000)
+    transform = transforms.Compose([
+        transforms.Resize((100, 100)),
+        transforms.RandomHorizontalFlip(), # Flips mouth left-right
+        transforms.RandomRotation(15),      # Handles head tilts
+        transforms.ColorJitter(brightness=0.2), # Handles different lighting
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+
+
+    # 3. Load & Split Dataset
+    dataset = datasets.ImageFolder(DATA_DIR, transform=transform)
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+    train_data, val_data = torch.utils.data.random_split(dataset, [train_size, val_size])
+
+    train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_data, batch_size=BATCH_SIZE, shuffle=False)
+
+    print(f"Total Images: {len(dataset)} | Training: {train_size} | Validation: {val_size}")
+
 
     # 6. Training Loop
     history = {'train_loss': [], 'val_acc': []}
