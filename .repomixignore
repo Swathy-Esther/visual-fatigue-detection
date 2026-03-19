@@ -13,5 +13,30 @@ report/
 
 # Media files (if any)
 *.mp4
-*.jpg
+*.jpeg
+
+# 1. Heavy Data & Environment (Ignore these!)
+venv/
+.venv/
+node_modules/
+Data/
+BIWI_Dataset/
+__pycache__/
+
+# 2. Large Binary Files
+*.pth
+*.task
+*.onnx
+*.exe
+
+# 3. Media & Logs
+*.mp4
+*.avi
 *.png
+*.jpg
+*.jpeg
+*.log
+*.csv
+
+# 4. Output files
+repomix-output.txt
