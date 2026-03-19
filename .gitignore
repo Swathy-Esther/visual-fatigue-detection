@@ -36,6 +36,7 @@ logs/
 dataset/
 raw_videos/
 processed_frames/
+*.csv
 
 # OS generated files
 .DS_Store
