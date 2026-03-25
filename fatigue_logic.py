@@ -1,39 +1,26 @@
 class FatigueDetector:
     def __init__(self):
-        # Settings (Thresholds)
-        self.EYE_CLOSED_LIMIT = 10 # Consecutive frames
-        self.PITCH_THRESHOLD = -20  # Degrees (Head tilted down)
-        self.YAWN_THRESHOLD = 0.7   # Probability
-
-        self.blink_count = 0
-        self.last_eye_state = 1 # 1 = Open, 0 = Closed
+        # Weighted importance for each indicator
+        self.W_EYE = 0.5    # PERCLOS is the strongest indicator
+        self.W_YAWN = 0.3
+        self.W_POSE = 0.2
         
-        # History
-        self.eye_counter = 0
-        self.is_alarm_active = False
-
-    def check_fatigue(self, eye_state, yawn_prob, pitch, yaw):
-        alarm_trigger = False
-        warning_trigger = False # Added a warning state
-        message = "Status: Alert"
-
-        # 1. Update Eye Counter
-        if eye_state == 0: 
-            self.eye_counter += 1
-        else:
-            self.eye_counter = 0
-
-        # 2. PRIORITY LOGIC (Check the most dangerous first)
-        if self.eye_counter >= self.EYE_CLOSED_LIMIT:
-            alarm_trigger = True
-            message = "ALARM: EYES CLOSED!"
+        self.last_eye_state = 1 # Assume Open
+    
+    def get_fusion_status(self, perclos, yawn_prob, pitch):
+        # 1. Normalize Posture (Score of 1.0 if slouching < -15 degrees)
+        # We lowered this from -20 to -15 to be more sensitive
+        pose_score = min(1.0, max(0.0, abs(pitch) / 15.0)) if pitch < -5 else 0.0
         
-        elif pitch < self.PITCH_THRESHOLD:
-            alarm_trigger = True
-            message = "ALARM: POSTURE SLOUCH!"
-
-        elif yawn_prob > 0.5: # Lowered threshold to 50% for testing
-            warning_trigger = True
-            message = "WARNING: YAWN DETECTED"
-
-        return alarm_trigger, warning_trigger, message
+        # 2. Calculate Weighted Fatigue Score
+        total_score = (perclos * self.W_EYE) + (yawn_prob * self.W_YAWN) + (pose_score * self.W_POSE)
+        
+        # 3. LOWERED THRESHOLDS for easier triggering during Demo
+        # If score > 0.45 -> ALARM
+        # If score > 0.20 -> WARNING
+        if total_score > 0.45: 
+            return total_score, True, False, "ALARM: CRITICAL", (0, 0, 255)
+        elif total_score > 0.20: 
+            return total_score, False, True, "WARNING: DROWSY", (0, 165, 255)
+        
+        return total_score, False, False, "STATUS: ALERT", (0, 255, 0)

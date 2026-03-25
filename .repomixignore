@@ -40,3 +40,14 @@ __pycache__/
 
 # 4. Output files
 repomix-output.txt
+
+# IDE Settings
+.vscode/
+.idea/
+
+# Jupyter Checkpoints (if you used notebooks for testing)
+.ipynb_checkpoints/
+
+# Documentation/Temp
+*.pdf
+temp/
