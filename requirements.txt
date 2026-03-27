@@ -1,0 +1,15 @@
+# Core Computer Vision & Media
+opencv-python
+mediapipe
+Pillow
+
+# Deep Learning Frameworks
+torch
+torchvision
+
+# Data Processing
+numpy
+pandas
+
+# Utilities
+# (standard libraries like csv, time, and collections don't need to be listed)
