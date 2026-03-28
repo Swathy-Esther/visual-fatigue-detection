@@ -18,9 +18,9 @@ class FatigueDetector:
         # 3. LOWERED THRESHOLDS for easier triggering during Demo
         # If score > 0.45 -> ALARM
         # If score > 0.20 -> WARNING
-        if total_score > 0.45: 
+        if total_score > 0.65: 
             return total_score, True, False, "ALARM: CRITICAL", (0, 0, 255)
-        elif total_score > 0.20: 
+        elif total_score > 0.30: 
             return total_score, False, True, "WARNING: DROWSY", (0, 165, 255)
         
         return total_score, False, False, "STATUS: ALERT", (0, 255, 0)
