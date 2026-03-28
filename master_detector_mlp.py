@@ -1,21 +1,18 @@
 import cv2
 import torch
 import torch.nn as nn
-import csv
 from torchvision import transforms, models
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from PIL import Image
 import numpy as np
-import time
-from fatigue_logic import FatigueDetector
+from collections import deque
 from temporal.eye_temporal_logic import EyeTemporalTracker
 from temporal.yawn_temporal_logic import YawnTemporalTracker
 from temporal.pose_temporal_logic import PoseTemporalTracker
-from collections import deque
 
-# --- 1. MODEL DEFINITIONS (Stay same) ---
+# --- 1. MODEL DEFINITIONS ---
 class EyeCNN(nn.Module):
     def __init__(self):
         super().__init__()
@@ -46,18 +43,20 @@ class PoseRegressor(nn.Module):
         )
     def forward(self, x): return self.base(x)
 
+# NEW: The Fusion Brain
+class FatigueFusionMLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(3, 16), nn.ReLU(),
+            nn.Linear(16, 8), nn.ReLU(),
+            nn.Dropout(0.2), nn.Linear(8, 1),
+            nn.Sigmoid() 
+        )
+    def forward(self, x): return self.net(x)
+
 # --- 2. INITIALIZATION ---
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-logic = FatigueDetector()
-
-
-eye_tracker = EyeTemporalTracker(window_size=60) # Existing
-yawn_tracker = YawnTemporalTracker(window_size=150) # New: 5-6s window
-pose_tracker = PoseTemporalTracker(window_size=150) # New: 5-6s window
-
-pitch_buffer = deque(maxlen=10) # Smooths the jittery pitch
-pitch_offset = 0.0
-calibrated = False
 
 # Load Models
 eye_model = EyeCNN().to(device)
@@ -72,29 +71,33 @@ pose_model = PoseRegressor().to(device)
 pose_model.load_state_dict(torch.load("models/pose_regressor.pth", map_location=device))
 pose_model.eval()
 
+fusion_model = FatigueFusionMLP().to(device)
+fusion_model.load_state_dict(torch.load("models/fusion_mlp.pth", map_location=device))
+fusion_model.eval()
+
 # MediaPipe Setup
 base_options = python.BaseOptions(model_asset_path='models/face_landmarker.task')
 options = vision.FaceLandmarkerOptions(base_options=base_options, running_mode=vision.RunningMode.IMAGE, num_faces=1)
 detector = vision.FaceLandmarker.create_from_options(options)
 
-# --- 3. THE TRANSFORMS (THE FIX) ---
+# Trackers
+eye_tracker = EyeTemporalTracker(window_size=60)
+yawn_tracker = YawnTemporalTracker(window_size=150)
+pose_tracker = PoseTemporalTracker(window_size=150)
+pitch_buffer = deque(maxlen=10)
+pitch_offset = 0.0
+calibrated = False
+
+# Transforms
 imagenet_tf = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
+    transforms.Resize((224, 224)), transforms.ToTensor(),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
-
-# CRITICAL FIX: Matches your yawn training (100x100)
 yawn_tf = transforms.Compose([
-    transforms.Resize((100, 100)), 
-    transforms.ToTensor(),
+    transforms.Resize((100, 100)), transforms.ToTensor(),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
-
-eye_tf = transforms.Compose([
-    transforms.Resize((64, 64)),
-    transforms.ToTensor()
-])
+eye_tf = transforms.Compose([transforms.Resize((64, 64)), transforms.ToTensor()])
 
 def get_crop(img, landmarks, indices, pad=15):
     h, w, _ = img.shape
@@ -102,19 +105,15 @@ def get_crop(img, landmarks, indices, pad=15):
     x_min, y_min = np.min(coords, axis=0); x_max, y_max = np.max(coords, axis=0)
     return img[max(0, y_min-pad):min(h, y_max+pad), max(0, x_min-pad):min(w, x_max+pad)]
 
-frame_count = 0
-LOG_INTERVAL = 5 # Log every 5 frames
-clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-# --- 4. MAIN LOOP ---
+# --- 3. MAIN LOOP ---
 cap = cv2.VideoCapture(0)
 while cap.isOpened():
     success, frame = cap.read()
     if not success: break
-
-    # DEFAULTS
-    pitch, yawn_prob, perclos, total_score = 0.0, 0.0, 0.0, 0.0
-    msg, color = "SEARCHING...", (255, 255, 255)
     
+    # DEFAULTS
+    mlp_score = 0.0
+    msg, color = "SEARCHING...", (255, 255, 255)
     key = cv2.waitKey(1) & 0xFF
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
@@ -123,70 +122,56 @@ while cap.isOpened():
     if result.face_landmarks:
         lms = result.face_landmarks[0]
         
-        # A. POSE (Smoothed)
-        face_indices = [10, 152, 234, 454] # Top, Bottom, Left, Right points
-        face_img = get_crop(rgb_frame, lms, face_indices, pad=40) # Large pad for head context
+        # A. POSE (LOOSE FACE CROP)
+        face_img = get_crop(rgb_frame, lms, [10, 152, 234, 454], pad=40)
         if face_img.size > 0:
-            # Send the CROPPED face to the model instead of the full frame
             pose_in = imagenet_tf(Image.fromarray(face_img)).unsqueeze(0).to(device)
             with torch.no_grad():
-                raw_p, _, _ = pose_model(pose_in).cpu().numpy()[0] * 90.0
-            
+                raw_p = pose_model(pose_in).cpu().numpy()[0][0] * 90.0
             pitch_buffer.append(raw_p)
             smooth_p = sum(pitch_buffer) / len(pitch_buffer)
-            
-            if key == ord('c'):
-                pitch_offset = smooth_p
-                calibrated = True
-                print("Calibrated!")
-                
+            if key == ord('c'): pitch_offset = smooth_p; calibrated = True
             pitch = smooth_p - pitch_offset if calibrated else smooth_p
-            pose_tracker.update(pitch) # <--- UPDATED: Feed to Temporal Tracker
+            pose_tracker.update(pitch)
 
-        # B. EYE (With CLAHE)
+        # B. EYE (CLAHE)
         eye_img = get_crop(rgb_frame, lms, [33, 133, 145, 159], pad=5)
         if eye_img.size > 0:
             gray = cv2.cvtColor(eye_img, cv2.COLOR_BGR2GRAY)
-            #clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-            eye_pre = clahe.apply(gray)
+            eye_pre = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)).apply(gray)
             eye_in = eye_tf(Image.fromarray(eye_pre)).unsqueeze(0).to(device)
             with torch.no_grad():
                 probs = torch.softmax(eye_model(eye_in), dim=1).cpu().numpy()[0]
-                eye_state = 1 if probs[1] > 0.5 else 0
-                eye_tracker.update(eye_state)
+                eye_tracker.update(1 if probs[1] > 0.5 else 0)
 
-        # C. YAWN (CORRECTED TRANSFORM & PADDING)
-        mouth_img = get_crop(rgb_frame, lms, [61, 291, 13, 14], pad=25) # More pad for jaw
+        # C. YAWN
+        mouth_img = get_crop(rgb_frame, lms, [61, 291, 13, 14], pad=25)
         if mouth_img.size > 0:
-            # Use the yawn_tf (100x100) specifically!
             m_in = yawn_tf(Image.fromarray(mouth_img)).unsqueeze(0).to(device)
             with torch.no_grad():
-                yawn_prob = torch.softmax(yawn_model(m_in), dim=1).cpu().numpy()[0][1]
-            yawn_tracker.update(yawn_prob) # <--- UPDATED: Feed to Temporal Tracker
+                yawn_tracker.update(torch.softmax(yawn_model(m_in), dim=1).cpu().numpy()[0][1])
 
-        # D. FUSION & LOGGING
+        # D. NEURAL FUSION
         perclos = eye_tracker.compute_perclos()
-        t_yawn = yawn_tracker.compute_score() # Stable yawn intensity/freq
-        t_pose = pose_tracker.compute_score() # Sustained bad posture
-        total_score, msg, color = logic.get_fusion_status(perclos, t_yawn, t_pose)
+        t_yawn = yawn_tracker.compute_score()
+        t_pose = pose_tracker.compute_score()
         
-        if frame_count % LOG_INTERVAL == 0:
-            with open('fusion_training_data.csv', 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([perclos, t_yawn, t_pose, total_score])
+        fusion_in = torch.tensor([[perclos, t_yawn, t_pose]], dtype=torch.float32).to(device)
+        with torch.no_grad():
+            mlp_score = fusion_model(fusion_in).item()
 
-        # E. UI (Spacing fixed)
+        if mlp_score > 0.65: msg, color = "ALARM: CRITICAL", (0, 0, 255)
+        elif mlp_score > 0.30: msg, color = "WARNING: DROWSY", (0, 165, 255)
+        else: msg, color = "STATUS: ALERT", (0, 255, 0)
 
+        # E. UI
         cv2.putText(frame, msg, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
         cv2.putText(frame, f"PERCLOS: {perclos:.2f}", (30, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         cv2.putText(frame, f"T_YAWN: {t_yawn:.2f}", (30, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         cv2.putText(frame, f"T_POSE: {t_pose:.2f}", (30, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-        cv2.putText(frame, f"SCORE: {total_score:.2f}", (30, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+        cv2.putText(frame, f"MLP SCORE: {mlp_score:.2f}", (30, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         
-    cv2.imshow('Temporal Visual Fatigue Detection v3.0', frame)
+    cv2.imshow('Visual Fatigue System v3.0', frame)
     if key == 27: break
-    frame_count += 1
 
-detector.close()
-cap.release()
-cv2.destroyAllWindows()
+cap.release(); cv2.destroyAllWindows()
