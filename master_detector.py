@@ -11,6 +11,8 @@ import numpy as np
 import time
 from fatigue_logic import FatigueDetector
 from temporal.eye_temporal_logic import EyeTemporalTracker
+from temporal.yawn_temporal_logic import YawnTemporalTracker
+from temporal.pose_temporal_logic import PoseTemporalTracker
 from collections import deque
 
 # --- 1. MODEL DEFINITIONS (Stay same) ---
@@ -47,7 +49,12 @@ class PoseRegressor(nn.Module):
 # --- 2. INITIALIZATION ---
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logic = FatigueDetector()
-tracker = EyeTemporalTracker(window_size=60)
+
+
+eye_tracker = EyeTemporalTracker(window_size=60) # Existing
+yawn_tracker = YawnTemporalTracker(window_size=150) # New: 5-6s window
+pose_tracker = PoseTemporalTracker(window_size=150) # New: 5-6s window
+
 pitch_buffer = deque(maxlen=10) # Smooths the jittery pitch
 pitch_offset = 0.0
 calibrated = False
@@ -97,7 +104,7 @@ def get_crop(img, landmarks, indices, pad=15):
 
 frame_count = 0
 LOG_INTERVAL = 5 # Log every 5 frames
-
+clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
 # --- 4. MAIN LOOP ---
 cap = cv2.VideoCapture(0)
 while cap.isOpened():
@@ -117,31 +124,36 @@ while cap.isOpened():
         lms = result.face_landmarks[0]
         
         # A. POSE (Smoothed)
-        pose_in = imagenet_tf(Image.fromarray(rgb_frame)).unsqueeze(0).to(device)
-        with torch.no_grad():
-            raw_p, _, _ = pose_model(pose_in).cpu().numpy()[0] * 90.0
-        
-        pitch_buffer.append(raw_p)
-        smooth_p = sum(pitch_buffer) / len(pitch_buffer)
-        
-        if key == ord('c'):
-            pitch_offset = smooth_p
-            calibrated = True
-            print("Calibrated!")
+        face_indices = [10, 152, 234, 454] # Top, Bottom, Left, Right points
+        face_img = get_crop(rgb_frame, lms, face_indices, pad=40) # Large pad for head context
+        if face_img.size > 0:
+            # Send the CROPPED face to the model instead of the full frame
+            pose_in = imagenet_tf(Image.fromarray(face_img)).unsqueeze(0).to(device)
+            with torch.no_grad():
+                raw_p, _, _ = pose_model(pose_in).cpu().numpy()[0] * 90.0
             
-        pitch = smooth_p - pitch_offset if calibrated else smooth_p
+            pitch_buffer.append(raw_p)
+            smooth_p = sum(pitch_buffer) / len(pitch_buffer)
+            
+            if key == ord('c'):
+                pitch_offset = smooth_p
+                calibrated = True
+                print("Calibrated!")
+                
+            pitch = smooth_p - pitch_offset if calibrated else smooth_p
+            pose_tracker.update(pitch) # <--- UPDATED: Feed to Temporal Tracker
 
         # B. EYE (With CLAHE)
         eye_img = get_crop(rgb_frame, lms, [33, 133, 145, 159], pad=5)
         if eye_img.size > 0:
             gray = cv2.cvtColor(eye_img, cv2.COLOR_BGR2GRAY)
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+            #clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
             eye_pre = clahe.apply(gray)
             eye_in = eye_tf(Image.fromarray(eye_pre)).unsqueeze(0).to(device)
             with torch.no_grad():
                 probs = torch.softmax(eye_model(eye_in), dim=1).cpu().numpy()[0]
                 eye_state = 1 if probs[1] > 0.5 else 0
-                tracker.update(eye_state)
+                eye_tracker.update(eye_state)
 
         # C. YAWN (CORRECTED TRANSFORM & PADDING)
         mouth_img = get_crop(rgb_frame, lms, [61, 291, 13, 14], pad=25) # More pad for jaw
@@ -150,24 +162,28 @@ while cap.isOpened():
             m_in = yawn_tf(Image.fromarray(mouth_img)).unsqueeze(0).to(device)
             with torch.no_grad():
                 yawn_prob = torch.softmax(yawn_model(m_in), dim=1).cpu().numpy()[0][1]
+            yawn_tracker.update(yawn_prob) # <--- UPDATED: Feed to Temporal Tracker
 
         # D. FUSION & LOGGING
-        perclos = tracker.compute_perclos()
-        total_score, alarm, warning, msg, color = logic.get_fusion_status(perclos, yawn_prob, pitch)
-
-        if frame_count % LOG_INTERVAL == 0:
+        perclos = eye_tracker.compute_perclos()
+        t_yawn = yawn_tracker.compute_score() # Stable yawn intensity/freq
+        t_pose = pose_tracker.compute_score() # Sustained bad posture
+        total_score, msg, color = logic.get_fusion_status(perclos, t_yawn, t_pose)
+        
+        '''if frame_count % LOG_INTERVAL == 0:
             with open('fusion_training_data.csv', 'a', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow([perclos, yawn_prob, pitch, total_score])
+                writer.writerow([perclos, yawn_prob, pitch, total_score])'''
 
         # E. UI (Spacing fixed)
+
         cv2.putText(frame, msg, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
         cv2.putText(frame, f"PERCLOS: {perclos:.2f}", (30, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-        cv2.putText(frame, f"YAWN PROB: {yawn_prob:.2f}", (30, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-        cv2.putText(frame, f"PITCH: {pitch:.1f}", (30, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-        cv2.putText(frame, f"TOTAL SCORE: {total_score:.2f}", (30, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+        cv2.putText(frame, f"T_YAWN: {t_yawn:.2f}", (30, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        cv2.putText(frame, f"T_POSE: {t_pose:.2f}", (30, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        cv2.putText(frame, f"SCORE: {total_score:.2f}", (30, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         
-    cv2.imshow('Visual Fatigue Detection v2.0', frame)
+    cv2.imshow('Temporal Visual Fatigue Detection v3.0', frame)
     if key == 27: break
     frame_count += 1
 
