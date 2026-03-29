@@ -107,71 +107,99 @@ def get_crop(img, landmarks, indices, pad=15):
 
 # --- 3. MAIN LOOP ---
 cap = cv2.VideoCapture(0)
-while cap.isOpened():
-    success, frame = cap.read()
-    if not success: break
-    
-    # DEFAULTS
-    mlp_score = 0.0
-    msg, color = "SEARCHING...", (255, 255, 255)
-    key = cv2.waitKey(1) & 0xFF
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-    result = detector.detect(mp_image)
-    
-    if result.face_landmarks:
-        lms = result.face_landmarks[0]
+print("System Starting... Press 'C' to calibrate once your face is visible.")
+
+try:
+    while cap.isOpened():
+        success, frame = cap.read()
+        if not success: 
+            print("Error: Could not read from webcam.")
+            break
         
-        # A. POSE (LOOSE FACE CROP)
-        face_img = get_crop(rgb_frame, lms, [10, 152, 234, 454], pad=40)
-        if face_img.size > 0:
-            pose_in = imagenet_tf(Image.fromarray(face_img)).unsqueeze(0).to(device)
-            with torch.no_grad():
-                raw_p = pose_model(pose_in).cpu().numpy()[0][0] * 90.0
-            pitch_buffer.append(raw_p)
-            smooth_p = sum(pitch_buffer) / len(pitch_buffer)
-            if key == ord('c'): pitch_offset = smooth_p; calibrated = True
-            pitch = smooth_p - pitch_offset if calibrated else smooth_p
-            pose_tracker.update(pitch)
-
-        # B. EYE (CLAHE)
-        eye_img = get_crop(rgb_frame, lms, [33, 133, 145, 159], pad=5)
-        if eye_img.size > 0:
-            gray = cv2.cvtColor(eye_img, cv2.COLOR_BGR2GRAY)
-            eye_pre = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)).apply(gray)
-            eye_in = eye_tf(Image.fromarray(eye_pre)).unsqueeze(0).to(device)
-            with torch.no_grad():
-                probs = torch.softmax(eye_model(eye_in), dim=1).cpu().numpy()[0]
-                eye_tracker.update(1 if probs[1] > 0.5 else 0)
-
-        # C. YAWN
-        mouth_img = get_crop(rgb_frame, lms, [61, 291, 13, 14], pad=25)
-        if mouth_img.size > 0:
-            m_in = yawn_tf(Image.fromarray(mouth_img)).unsqueeze(0).to(device)
-            with torch.no_grad():
-                yawn_tracker.update(torch.softmax(yawn_model(m_in), dim=1).cpu().numpy()[0][1])
-
-        # D. NEURAL FUSION
+        # 1. INITIALIZE VARIABLES FOR THIS FRAME
+        # This prevents "UnboundLocalError" if face is not detected
+        mlp_score = 0.0
         perclos = eye_tracker.compute_perclos()
         t_yawn = yawn_tracker.compute_score()
         t_pose = pose_tracker.compute_score()
+        msg, color = "SEARCHING FOR FACE...", (255, 255, 255)
         
-        fusion_in = torch.tensor([[perclos, t_yawn, t_pose]], dtype=torch.float32).to(device)
-        with torch.no_grad():
-            mlp_score = fusion_model(fusion_in).item()
+        key = cv2.waitKey(1) & 0xFF
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+        result = detector.detect(mp_image)
+        
+        if result.face_landmarks:
+            lms = result.face_landmarks[0]
+            
+            # A. POSE (LOOSE FACE CROP)
+            face_img = get_crop(rgb_frame, lms, [10, 152, 234, 454], pad=40)
+            if face_img.size > 0:
+                pose_in = imagenet_tf(Image.fromarray(face_img)).unsqueeze(0).to(device)
+                with torch.no_grad():
+                    raw_p = pose_model(pose_in).cpu().numpy()[0][0] * 90.0
+                
+                pitch_buffer.append(raw_p)
+                smooth_p = sum(pitch_buffer) / len(pitch_buffer)
+                
+                if key == ord('c'):
+                    pitch_offset = smooth_p
+                    calibrated = True
+                    print("Calibration Successful!")
+                
+                pitch = smooth_p - pitch_offset if calibrated else 0.0
+                pose_tracker.update(pitch)
 
-        if mlp_score > 0.65: msg, color = "ALARM: CRITICAL", (0, 0, 255)
-        elif mlp_score > 0.30: msg, color = "WARNING: DROWSY", (0, 165, 255)
-        else: msg, color = "STATUS: ALERT", (0, 255, 0)
+            # B. EYE (CLAHE)
+            eye_img = get_crop(rgb_frame, lms, [33, 133, 145, 159], pad=5)
+            if eye_img.size > 0:
+                gray = cv2.cvtColor(eye_img, cv2.COLOR_BGR2GRAY)
+                eye_pre = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)).apply(gray)
+                eye_in = eye_tf(Image.fromarray(eye_pre)).unsqueeze(0).to(device)
+                with torch.no_grad():
+                    probs = torch.softmax(eye_model(eye_in), dim=1).cpu().numpy()[0]
+                    eye_tracker.update(1 if probs[1] > 0.5 else 0)
 
-        # E. UI
+            # C. YAWN
+            mouth_img = get_crop(rgb_frame, lms, [61, 291, 13, 14], pad=25)
+            if mouth_img.size > 0:
+                m_in = yawn_tf(Image.fromarray(mouth_img)).unsqueeze(0).to(device)
+                with torch.no_grad():
+                    y_prob = torch.softmax(yawn_model(m_in), dim=1).cpu().numpy()[0][1]
+                    yawn_tracker.update(y_prob)
+
+            # D. NEURAL FUSION
+            perclos = eye_tracker.compute_perclos()
+            t_yawn = yawn_tracker.compute_score()
+            t_pose = pose_tracker.compute_score()
+            
+            fusion_in = torch.tensor([[perclos, t_yawn, t_pose]], dtype=torch.float32).to(device)
+            with torch.no_grad():
+                mlp_score = fusion_model(fusion_in).item()
+
+            if mlp_score > 0.65: msg, color = "ALARM: CRITICAL", (0, 0, 255)
+            elif mlp_score > 0.30: msg, color = "WARNING: DROWSY", (0, 165, 255)
+            else: msg, color = "STATUS: ALERT", (0, 255, 0)
+
+        # E. UI DISPLAY
         cv2.putText(frame, msg, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+
+        # New: Temporal Tracker Values (In RED)
         cv2.putText(frame, f"PERCLOS: {perclos:.2f}", (30, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         cv2.putText(frame, f"T_YAWN: {t_yawn:.2f}", (30, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         cv2.putText(frame, f"T_POSE: {t_pose:.2f}", (30, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         cv2.putText(frame, f"MLP SCORE: {mlp_score:.2f}", (30, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         
-    cv2.imshow('Visual Fatigue System v3.0', frame)
-    if key == 27: break
+        cv2.imshow('MLP Fatigue System v3.0', frame)
+        if key == 27: # ESC key
+            break
 
-cap.release(); cv2.destroyAllWindows()
+except Exception as e:
+    print(f"An error occurred: {e}")
+
+finally:
+    # CLEANUP - This order is important to prevent crashes
+    print("Closing system...")
+    cap.release()
+    cv2.destroyAllWindows()
+    detector.close() # Manually closing MediaPipe stops the 'NoneType' error
