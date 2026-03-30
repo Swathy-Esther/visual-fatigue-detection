@@ -32,12 +32,16 @@ wheels/
 # Data and Logs
 data/
 [Dd]ata/
+Dataset_test/
 logs/
 *.log
 dataset/
 raw_videos/
 processed_frames/
 *.csv
+*.jpg
+*.jpeg
+*.png
 
 # OS generated files
 .DS_Store

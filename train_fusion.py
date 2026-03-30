@@ -6,7 +6,7 @@ import os
 from torch.utils.data import DataLoader, TensorDataset
 
 # 1. THE FUSION BRAIN ARCHITECTURE
-class FatigueFusionMLP(nn.Module):
+'''class FatigueFusionMLP(nn.Module):
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
@@ -18,11 +18,23 @@ class FatigueFusionMLP(nn.Module):
             nn.Linear(8, 1),
             nn.Sigmoid()        # Output probability: 0.0 (Alert) to 1.0 (Critical)
         )
-    def forward(self, x): return self.net(x)
+    def forward(self, x): return self.net(x)'''
+
+class FatigueFusionMLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(3, 16), nn.ReLU(),
+            nn.Linear(16, 8), nn.ReLU(),
+            nn.Dropout(0.2), 
+            nn.Linear(8, 1) # Removed nn.Sigmoid() from here
+        )
+    def forward(self, x): 
+        return self.net(x)
 
 def train_model():
     # 2. CONFIGURATION
-    FILE_PATH = 'fusion_training_data.csv'
+    FILE_PATH = 'fusion_training_data_refined.csv'
     MODEL_DIR = 'models'
     os.makedirs(MODEL_DIR, exist_ok=True)
     
@@ -32,7 +44,7 @@ def train_model():
     # 3. LOAD & PREPARE DATA
     try:
         # We skip the header if you added one in Excel
-        df = pd.read_csv(FILE_PATH)
+        df = pd.read_csv(FILE_PATH, header=None)
         # Ensure we only have the 4 essential columns
         X_data = df.iloc[:, :3].values.astype('float32') # Features
         y_data = df.iloc[:, 3].values.astype('float32').reshape(-1, 1) # Target Score
@@ -49,12 +61,18 @@ def train_model():
 
     # 4. INITIALIZE TRAINING
     model = FatigueFusionMLP().to(device)
-    criterion = nn.MSELoss() 
-    optimizer = optim.Adam(model.parameters(), lr=0.005)
+
+    # Give 'Fatigued' (Label 1) 5x more importance to fix the low recall
+    pos_weight = torch.tensor([3.0]).to(device) 
+
+    # This combines Sigmoid + Binary Cross Entropy
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    #criterion = nn.MSELoss() 
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     # 5. TRAINING LOOP
     print("Starting Training (approx. 30 seconds)...")
-    for epoch in range(100):
+    for epoch in range(300):
         model.train()
         epoch_loss = 0
         for batch_X, batch_y in loader:
